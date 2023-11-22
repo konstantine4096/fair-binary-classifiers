@@ -1,0 +1,338 @@
+define (solve constraint) :=
+  let {ht := (HashTable.table);
+       options := |{'solver := 'yices, 'results := ht }|;
+       result := (SMT.smt-solve constraint options)}
+    match result {
+      'Satisfiable => (options 'results)
+    | _ => 'UNSAT
+    }
+
+datatype Person := p1 | p2 | p3 | p4 | p5 | p6 | p7 | p8 | p9 | p10 | p11 | p12 
+                 | q1 | q2 | q3 | q4 | q5 | q6 | q7 | q8 | q9 | q10 
+
+# Define the collective ground truth, consisting of each person's credit score along with the value of the target variable y for each person 
+# (whether the person actually repaid the loan): 
+
+define group-1-ground-truth :=
+   (Map.make [[p1  [720 0]]
+              [p2  [546 0]]
+	      [p3  [815 1]]
+	      [p4  [692 0]]
+	      [p5  [683 0]]
+    	      [p6  [712 1]]	      
+	      [p7  [812 1]]
+	      [p8  [819 1]]
+	      [p9  [809 1]]
+	      [p10 [762 0]]
+	      [p11 [784 1]]
+	      [p12 [747 1]]])
+
+define group-2-ground-truth :=
+  (Map.make [[q1  [445 0]]
+             [q2  [625 1]]
+	     [q3  [671 1]]
+	     [q4  [800 1]]
+	     [q5  [630 0]]
+	     [q6  [454 0]]
+	     [q7  [553 0]]
+	     [q8  [750 1]]
+	     [q9  [610 0]]
+	     [q10 [558 0]]])
+
+define all-people := (constructors-of "Person")
+define N := (length all-people)
+
+define (group1-person? c) := (prefix? "p" (val->string c))
+
+define group-1-people := (filter all-people group1-person?)
+define group-2-people := (filter-out all-people group1-person?)
+
+#======================= Function Symbol Declarations  
+
+# These should be self-explanatory, e.g., (y p4) means that p4 actually repayed the loan, (y' p4) means that the model
+# predicts that p4 will repay the loan; (tp p4) means that p4 is a true positive, and so on. All of these predicates
+# are defined below, with the exception of the "model" y', which will be found automatically by the SMT solver.
+
+declare y, y',tp, tn, fp, fn, accurate: [Person] -> Boolean
+
+# Also self-explanatory, e.g. (score p4) denotes the credit score of p4: 
+declare score: [Person] -> Int
+
+# This is the threshold that the model has to choose: 
+declare cutoff: Int
+
+# All symbols whose names end in "-bit" represent indicator random variables, with conditional definitions
+# of the form "if such-and-such then 1 else 0":
+
+declare tp-bit, tn-bit, fp-bit, fn-bit, pos-pred-bit, neg-pred-bit, acc-pred-bit, positive-bit: [Person] -> Int
+
+declare group-1-positives, group-2-positives: Int
+
+# Some metrics of interest:
+
+declare precision-group-1, precision-group-2, precision, accuracy: Real
+
+# All of the following are integer quantities of interest. "NEG-group-1" stands for the total number of actually negative individuals
+# in group 1, and so on: 
+
+declare TP, TN, FP, FN, TOT, NEG-group-1, NEG-group-2, POS-group-1, POS-group-2, PPOS, PNEG, TP-group-1, TP-group-2, TN-group-1: Int
+
+# More integer quantities of interest, which should be self-explanatory. For instance, TN-group-2 is the total number of true negatives
+# in group 2. "PPOS" stands for predicted positives and "PNEG" for predicted negatives.
+
+declare TN-group-2, FP-group-1, FP-group-2, FN-group-1, FN-group-2, PPOS-group-1, PPOS-group-2, PNEG-group-1, PNEG-group-2, accurate-preds, error-preds: Int
+
+# False-positive and true-positive rates for the two groups; these are real numbers:
+
+declare FPR-group-1, FPR-group-2, TPR-group-1, TPR-group-2: Real
+
+# Make a score map that maps each person to his or her credit score:
+
+define score-map := (Map.make (join (map (lambda (person) [person (first (group-1-ground-truth person))]) group-1-people)
+	                            (map (lambda (person) [person (first (group-2-ground-truth person))]) group-2-people)))
+
+define (make-fact person bit) :=
+  match bit {
+    0 => (~ y person)
+  | _ => (y person)
+  }
+
+# Turn the ground truth given above into logical formulas.
+
+define facts := (join (map (lambda (person) (make-fact person (second (group-1-ground-truth person)))) group-1-people)
+                      (map (lambda (person) (make-fact person (second (group-2-ground-truth person)))) group-2-people)
+	              (map (lambda (person) (= (score person) (score-map person))) all-people))
+
+# The collective ground truth includes the constraint that the model should produce a positive prediction
+# for a person if and only if that person's credit score is over the chosen threshold: 
+
+define ground-truth := (join facts (map (lambda (person)
+                                          (y' person <==> score person >= cutoff))
+					all-people))
+
+# Logical definitions of what it means to be a true positive, a true negative, a false positive, or a false negative:
+
+define pos-neg-defs := 
+  (map (lambda (person)
+         (and (tp person <==> y' person & y person)
+              (tn person <==> ~ y' person & ~ y person)
+              (fp person <==> y' person & ~ y person)
+              (fn person <==> ~ y' person & y person)))
+       all-people)
+       
+# Logical definitions of group-1-positives and group-2-positives: These are just the sums of
+# the indicator variable positive-bit taken across all members of the two groups: 
+
+define positive-defs  := 
+  (join (map (lambda (person)
+               (= (positive-bit person) (ite (y person) 1 0)))
+             all-people)
+        [(= group-2-positives (foldr + 0 (map positive-bit group-2-people)))
+	 (= group-1-positives (foldr + 0 (map positive-bit group-1-people)))])
+
+# Give conditional definitions (using the if-then-else operator, ite) for tp-bit, tn-bit, and so on: 
+
+define indicator-variable-defs :=
+  (map (lambda (person)
+         (and (tp-bit person = ite (tp person) 1 0)
+              (tn-bit person = ite (tn person) 1 0)
+              (fp-bit person = ite (fp person) 1 0)
+              (fn-bit person = ite (fn person) 1 0)
+     	      (pos-pred-bit person = ite (y' person) 1 0)
+  	      (neg-pred-bit person = ite (y' person) 0 1)))
+       all-people)	     
+
+# Define all elements of the confusion matrix, both globally and by group: 
+
+define confusion-matrix-defs :=
+  [(= TP-group-1 (foldr + 0 (map tp-bit group-1-people)))
+   (= TP-group-2 (foldr + 0 (map tp-bit group-2-people)))
+   (= FP-group-1 (foldr + 0 (map fp-bit group-1-people)))
+   (= FP-group-2 (foldr + 0 (map fp-bit group-2-people)))
+   (= TN-group-1 (foldr + 0 (map tn-bit group-1-people)))
+   (= TN-group-2 (foldr + 0 (map tn-bit group-2-people)))  
+   (= FN-group-1 (foldr + 0 (map fn-bit group-1-people)))
+   (= FN-group-2 (foldr + 0 (map fn-bit group-2-people)))  
+   (= PPOS-group-1 (foldr + 0 (map pos-pred-bit group-1-people)))
+   (= PPOS-group-2 (foldr + 0 (map pos-pred-bit group-2-people)))  
+   (= PNEG-group-1 (foldr + 0 (map neg-pred-bit group-1-people)))
+   (= PNEG-group-2 (foldr + 0 (map neg-pred-bit group-2-people)))  
+   (= TP (+ TP-group-1 TP-group-2))
+   (= FP (+ FP-group-1 FP-group-2))
+   (= TN (+ TN-group-1 TN-group-2))
+   (= FN (+ FN-group-1 FN-group-2))
+   (= PPOS (+ PPOS-group-1 PPOS-group-2))
+   (= PNEG (+ PNEG-group-1 PNEG-group-2))
+   (= NEG-group-1 (+ FP-group-1 TN-group-1))
+   (= NEG-group-2 (+ FP-group-2 TN-group-2))
+   (= POS-group-1 (+ TP-group-1 FN-group-1))
+   (= POS-group-2 (+ TP-group-2 FN-group-2))
+   (= (length all-people) (TP + FP + TN + FN))]
+
+define (make-defs definiens ind-quant ind-quant-lo ind-quant-hi dep-quant dep-quant-lambda) := 
+   let {outer-range := (from-to ind-quant-lo ind-quant-hi);
+       process := lambda (i)
+	            let {range := (from-to 0 i);
+		         quads := (map (lambda (x)
+			                   [(= dep-quant x) --> (dep-quant-lambda x i) |])
+                                       range);
+                         all-but-last-quad-joined := (flatten (all-but-last quads));
+			 last-element := (third (last quads))}
+                      (if (= ind-quant i)
+		          (= definiens (ite* (join all-but-last-quad-joined [last-element]))))}
+      (map process outer-range)
+
+define [definiens ind-quant ind-quant-lo ind-quant-hi dep-quant] := [precision-group-1 PPOS-group-1 0 5 TP-group-1] 
+
+# The following computes precision by dividing tp by ppos:
+
+define precision-lambda := 
+  lambda (tp ppos)
+    let {denom := (times ppos 1.0)}
+      check {(equals? denom 0.0) => 0.0
+           | else => (div (times 1.0 tp) denom)}
+
+
+define precision-group-1-defs := (make-defs precision-group-1 PPOS-group-1 0 (length group-1-people) TP-group-1 precision-lambda)
+define precision-group-2-defs := (make-defs precision-group-2 PPOS-group-2 0 (length group-2-people) TP-group-2 precision-lambda)
+
+define rate-maker :=
+  lambda (pos-count neg)
+    let {denom := (float neg)}
+      check {(denom equals? 0.0) => 0.0
+            | else => (div (float pos-count) denom)}
+  
+define fpr-group-1-defs := (make-defs FPR-group-1 NEG-group-1 0 (length group-1-people) FP-group-1 rate-maker)
+define fpr-group-2-defs := (make-defs FPR-group-2 NEG-group-2 0 (length group-2-people) FP-group-2 rate-maker)
+define tpr-group-1-defs := (make-defs TPR-group-1 POS-group-1 0 (length group-1-people) TP-group-1 rate-maker)
+define tpr-group-2-defs := (make-defs TPR-group-2 POS-group-2 0 (length group-2-people) TP-group-2 rate-maker)
+
+define precision-defs := (join precision-group-1-defs precision-group-2-defs)
+
+define error-rate-defs := (join fpr-group-1-defs fpr-group-2-defs tpr-group-1-defs tpr-group-2-defs)
+
+define equalized-odds := (FPR-group-1 = FPR-group-2 & TPR-group-1 = TPR-group-2)
+
+define predictive-parity := (precision-group-1 = precision-group-2)
+
+define accuracy-defs := 
+  (join (map (lambda (p)
+               (accurate p <==> y p & y' p | ~ y p & ~ y' p))
+              all-people)
+	(map (lambda (p)
+    	       (acc-pred-bit p = (ite (accurate p) 1 0)))
+             all-people)
+         (map (lambda (i)
+	        (if (= accurate-preds i)
+		    (= accuracy (div (float i) N))))
+              (from-to 0 N))	     
+         [(= accurate-preds (foldr + 0 (map acc-pred-bit all-people)))
+          (= error-preds (- (length all-people) accurate-preds))])
+
+define all := (join positive-defs
+                    ground-truth
+		    pos-neg-defs
+		    indicator-variable-defs
+		    confusion-matrix-defs
+		    precision-defs
+		    error-rate-defs
+		    accuracy-defs)
+
+define (acc M) := (first (HashTable.lookup M accuracy))
+  
+define (avg-accuracy models) := 
+  let {accuracies := (map (lambda (M) (first (HashTable.lookup M accuracy)))
+                           models)}
+    (div (plus* accuracies)
+         (float (length models)))
+
+define (ask M x) := 
+  try {(first (HashTable.lookup M x)) | 'not-found}
+
+define (float' x) := 
+   try {(float x) | 'undefined}
+ 
+define (extract-model-from-table T) := 
+  let {POS := (plus (ask T POS-group-1) (ask T POS-group-2));
+       NEG := (plus (ask T NEG-group-1) (ask T NEG-group-2));
+       ppos := (float' (ask T PPOS));
+       make-model-sentence := lambda (p)
+	                        check {(ask T (y p)) => 1
+				      | else => 0};
+       make-prediction-sentence := lambda (p)
+	                            check {(ask T (y' p)) => 1
+			   	         | else => 0};
+       precision := check {(equal? ppos 0.0) => 'undefined 
+                         | else => (div  (float' (ask T TP))
+			                 (float' (ask T PPOS)))};
+       recall := (div  (float' (ask T TP)) POS);
+       f1 := try {(times 2.0 (div (times precision recall) (plus precision recall))) | 'undefined};
+       metrics := (Map.make
+	             [['precision precision]
+                     ['recall    recall]
+                     ['F1-score   f1]		     
+		     ['accuracy (try (ask T accuracy) 'not-found)]
+		     ['cutoff (try (ask T cutoff) 'not-found)]		  
+		     ['precision-group-1 (ask T precision-group-1)]
+		     ['precision-group-2 (ask T precision-group-2)]
+		     ['TP-group-1 (ask T TP-group-1)]
+		     ['FP-group-1 (ask T FP-group-1)]
+		     ['TN-group-1 (ask T TN-group-1)]
+		     ['FN-group-1 (ask T FN-group-1)]		     
+		     ['TP-group-2 (ask T TP-group-2)]		     
+		     ['FP-group-2 (ask T FP-group-2)]		     
+		     ['TN-group-2 (ask T TN-group-2)]
+		     ['FN-group-2 (ask T FN-group-2)]		     		     
+		     ['TP (ask T TP)]
+		     ['FP (ask T FP)]
+		     ['TN (ask T TN)]
+		     ['FN (ask T FN)]
+		     ['NEG-group-2 (ask T NEG-group-2)]
+		     ['NEG-group-1 (ask T NEG-group-1)]
+		     ['POS-group-2 (ask T POS-group-2)]
+		     ['POS-group-1 (ask T POS-group-1)]		     		     
+		     ['POS POS]
+		     ['NEG NEG]
+		     ['TOTAL (plus POS NEG)]
+		     ['PPOS (ask T PPOS)]
+		     ['PNEG (ask T PNEG)]		     
+		     ['NEG NEG]		     
+		     ['TPR-group-1 (float' (ask T TPR-group-1))]
+		     ['TPR-group-2 (float' (ask T TPR-group-2))]
+		     ['FPR-group-1 (float' (ask T FPR-group-1))]
+		     ['FPR-group-2 (float' (ask T FPR-group-2))]]);   		     
+       model :=	(Map.make (map (lambda (p)
+	                           [p |{'truth := (make-model-sentence p), 'prediction := (make-prediction-sentence p), 'score := (score-map p)}|])
+			       all-people));
+       res := |{'model := model, 'metrics := metrics}|}
+   res       
+    
+define nonzero-precision := (precision-group-1 > 0 | precision-group-2 > 0)
+
+define (impose constraints) := 
+  let {constraints-list := match constraints {
+                             (some-list _) => constraints
+			   | _ => [constraints]}}
+    match (solve  (join constraints-list [(= cutoff ?CUTOFF:Int)] all)) {
+      (some-term t) => t
+    | T => (extract-model-from-table T)}
+
+define (approx-eq-odds delta) := 
+   (and (if (> FPR-group-1 FPR-group-2)
+            (< (- FPR-group-1 FPR-group-2) delta))
+        (if (<= FPR-group-1 FPR-group-2)
+  	    (< (- FPR-group-2 FPR-group-1) delta))
+        (if (> TPR-group-1 TPR-group-2)
+            (< (- TPR-group-1 TPR-group-2) delta))
+        (if (<= TPR-group-1 TPR-group-2)
+  	    (< (- TPR-group-2 TPR-group-1) delta)))
+
+EOF
+
+
+load "fair6"
+
+
+
+(impose (accuracy > 0.9))
+
