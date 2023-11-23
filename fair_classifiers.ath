@@ -1,12 +1,3 @@
-define (solve constraint) :=
-  let {ht := (HashTable.table);
-       options := |{'solver := 'yices, 'results := ht }|;
-       result := (SMT.smt-solve constraint options)}
-    match result {
-      'Satisfiable => (options 'results)
-    | _ => 'UNSAT
-    }
-
 datatype Person := p1 | p2 | p3 | p4 | p5 | p6 | p7 | p8 | p9 | p10 | p11 | p12 
                  | q1 | q2 | q3 | q4 | q5 | q6 | q7 | q8 | q9 | q10 
 
@@ -17,7 +8,7 @@ define group-1-ground-truth :=
    (Map.make [[p1  [720 0]]
               [p2  [546 0]]
 	      [p3  [815 1]]
-	      [p4  [692 0]]
+	      [p4  [699 0]]
 	      [p5  [683 0]]
     	      [p6  [712 1]]	      
 	      [p7  [812 1]]
@@ -42,7 +33,7 @@ define group-2-ground-truth :=
 define all-people := (constructors-of "Person")
 define N := (length all-people)
 
-define (group1-person? c) := (prefix? "p" (val->string c))
+define (group1-person? c) := (member? `p (val->string c))
 
 define group-1-people := (filter all-people group1-person?)
 define group-2-people := (filter-out all-people group1-person?)
@@ -309,6 +300,15 @@ define (extract-model-from-table T) :=
     
 define nonzero-precision := (precision-group-1 > 0 | precision-group-2 > 0)
 
+define (solve constraint) :=
+  let {ht := (HashTable.table);
+       options := |{'solver := 'yices, 'results := ht }|;
+       result := (SMT.smt-solve constraint options)}
+    match result {
+      'Satisfiable => (options 'results)
+    | _ => 'UNSAT
+    }
+
 define (impose constraints) := 
   let {constraints-list := match constraints {
                              (some-list _) => constraints
@@ -317,22 +317,17 @@ define (impose constraints) :=
       (some-term t) => t
     | T => (extract-model-from-table T)}
 
-define (approx-eq-odds delta) := 
-   (and (if (> FPR-group-1 FPR-group-2)
-            (< (- FPR-group-1 FPR-group-2) delta))
-        (if (<= FPR-group-1 FPR-group-2)
-  	    (< (- FPR-group-2 FPR-group-1) delta))
-        (if (> TPR-group-1 TPR-group-2)
-            (< (- TPR-group-1 TPR-group-2) delta))
-        (if (<= TPR-group-1 TPR-group-2)
-  	    (< (- TPR-group-2 TPR-group-1) delta)))
 
-EOF
+define (approximate-equality quantity1 quantity2 delta) := 
+  let {diff := (ite (> quantity1 quantity2)
+                    (- quantity1 quantity2)
+		    (- quantity2 quantity1))}
+    (<= diff delta)
 
-
-load "fair6"
-
-
-
-(impose (accuracy > 0.9))
+define (approx-pred-parity delta) :=
+  (approximate-equality precision-group-1 precision-group-2 delta)
+  
+define (approx-eq-odds delta) :=
+   (and (approximate-equality FPR-group-1 FPR-group-2 delta)
+        (approximate-equality TPR-group-1 TPR-group-2 delta))         
 
